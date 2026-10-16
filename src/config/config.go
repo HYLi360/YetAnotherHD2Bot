@@ -121,13 +121,25 @@ type TranslateConfig struct {
 }
 
 // ArsenalConfig 是装备图鉴（/gun、/strat、/armor、/grenade、/warbonds）的数据层配置。
-// 数据来源是固定的两个上游地址，因此这里只配缓存与镜像，不开放改源（改源需要同时改解析逻辑）。
+//
+// 数据源默认是社区维护的 helldivers-api（每天自动抓 wiki.gg，游戏出新债券能自己跟上）；
+// hd2tool 是建站时用的静态目录，已停止更新（数据停在 2026-08-14），只在需要时切回来用。
 type ArsenalConfig struct {
 	Dir     string `mapstructure:"dir"`     // 缓存目录（相对进程工作目录），留空用 data/arsenal
 	TTL     Second `mapstructure:"ttl"`     // 目录缓存有效期（秒），0 表示用默认的 24 小时
 	Timeout Second `mapstructure:"timeout"` // 单次下载超时（秒）
-	// Mirror 是 GitHub 镜像前缀，只在主源（raw.githubusercontent.com）连不上时使用；
-	// 填 "-" 表示不用镜像（例如能直连 GitHub 的机器）。
+	// Source 选数据源：helldivers-api（默认）或 hd2tool。
+	Source string `mapstructure:"source"`
+	// APIBase 是 helldivers-api 的站点地址，留空用内置默认值；自建镜像时改这里。
+	APIBase string `mapstructure:"api_base"`
+	// ZhWikiBase 是补中文名的术语表地址（社区中文维基），留空用内置默认值；
+	// 填 "-" 表示不拉术语表，只用内置中文名表。
+	ZhWikiBase string `mapstructure:"zh_wiki"`
+	// ZhNames 是本地中文名覆盖表（id → 中文名），留空用缓存目录下的 zh-names.local.json；
+	// 文件不存在是正常情况。
+	ZhNames string `mapstructure:"zh_names"`
+	// Mirror 是老源（hd2tool）的 GitHub 镜像前缀，只在主源（raw.githubusercontent.com）
+	// 连不上时使用；填 "-" 表示不用镜像（例如能直连 GitHub 的机器）。
 	Mirror string `mapstructure:"mirror"`
 }
 
@@ -234,6 +246,10 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("arsenal.dir", "data/arsenal")
 	v.SetDefault("arsenal.ttl", 86400)
 	v.SetDefault("arsenal.timeout", 30)
+	v.SetDefault("arsenal.source", "helldivers-api")
+	v.SetDefault("arsenal.api_base", "https://helldivers-api.dionatha.com.br")
+	v.SetDefault("arsenal.zh_wiki", "https://jerry114514.github.io/HD2_Wiki/data/wiki/zh")
+	v.SetDefault("arsenal.zh_names", "")
 	v.SetDefault("arsenal.mirror", "https://gh-proxy.org/")
 	v.SetDefault("bestiary.dir", "data/bestiary")
 	v.SetDefault("bestiary.ttl", 86400)
@@ -365,10 +381,14 @@ func (c *Config) Validate() error {
 		}
 	}
 
-	// 图鉴两段：这两个数据源的地址不开放配置，所以只校验「能不能真的发得出去请求」的那几项。
-	// 缓存目录留空是有意义的（走默认值），因此不校验；TTL 为 0 也表示用默认值，负数没有意义。
+	// 图鉴两段：缓存目录留空是有意义的（走默认值），因此不校验；
+	// TTL 为 0 也表示用默认值，负数没有意义。
 	c.Arsenal.Dir = strings.TrimSpace(c.Arsenal.Dir)
 	c.Arsenal.Mirror = strings.TrimSpace(c.Arsenal.Mirror)
+	c.Arsenal.Source = normalizeArsenalSource(c.Arsenal.Source)
+	c.Arsenal.APIBase = strings.TrimSpace(c.Arsenal.APIBase)
+	c.Arsenal.ZhWikiBase = strings.TrimSpace(c.Arsenal.ZhWikiBase)
+	c.Arsenal.ZhNames = strings.TrimSpace(c.Arsenal.ZhNames)
 	c.Bestiary.Dir = strings.TrimSpace(c.Bestiary.Dir)
 	c.Bestiary.WikiAPI = strings.TrimSpace(c.Bestiary.WikiAPI)
 	if c.Arsenal.TTL < 0 {
@@ -376,6 +396,17 @@ func (c *Config) Validate() error {
 	}
 	if c.Arsenal.Timeout <= 0 {
 		errs = append(errs, errors.New("arsenal.timeout 必须大于 0（秒）"))
+	}
+	switch c.Arsenal.Source {
+	case "", "helldivers-api", "hd2tool":
+	default:
+		errs = append(errs, fmt.Errorf("arsenal.source 只能是 helldivers-api 或 hd2tool，实际为 %q", c.Arsenal.Source))
+	}
+	if c.Arsenal.APIBase != "" && !strings.HasPrefix(c.Arsenal.APIBase, "http") {
+		errs = append(errs, fmt.Errorf("arsenal.api_base 必须是以 http 开头的站点地址，实际为 %q", c.Arsenal.APIBase))
+	}
+	if c.Arsenal.ZhWikiBase != "" && c.Arsenal.ZhWikiBase != "-" && !strings.HasPrefix(c.Arsenal.ZhWikiBase, "http") {
+		errs = append(errs, fmt.Errorf("arsenal.zh_wiki 必须是以 http 开头的站点地址、留空或填 \"-\"，实际为 %q", c.Arsenal.ZhWikiBase))
 	}
 	if c.Bestiary.TTL < 0 {
 		errs = append(errs, errors.New("bestiary.ttl 不能为负数（0 表示用默认的 24 小时）"))
@@ -400,4 +431,18 @@ func (c *Config) Validate() error {
 	}
 
 	return errors.Join(errs...)
+}
+
+// normalizeArsenalSource 归一化数据源取值：大小写与空白不敏感，留空用默认源。
+// 取值合法性由 Validate 判定，这里只做规范化，避免 "HD2Tool" 这种写法被当成未知源。
+func normalizeArsenalSource(source string) string {
+	trimmed := strings.ToLower(strings.TrimSpace(source))
+	switch trimmed {
+	case "", "helldivers-api":
+		return "helldivers-api"
+	case "hd2tool":
+		return "hd2tool"
+	default:
+		return trimmed
+	}
 }

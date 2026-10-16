@@ -18,18 +18,22 @@ import (
 	"math"
 )
 
-// 图片格式的 data URI 前缀。只认这三种：卡片用到的图片来源固定（内置素材与上游目录都是 PNG/SVG，
-// 渲染输出格式另说），多认几种格式只会让「认错了」变得更难发现。
+// 图片格式的 data URI 前缀。认 PNG / JPEG / SVG / WebP 四种：
+// 装备图现在是 WebP（数据源换成 helldivers-api 之后上游给的都是 .webp），Chromium 能直接渲染；
+// 多认几种格式只会让「认错了」变得更难发现，所以每种都配一个明确的魔数/开头标记。
 const (
 	imgPNGURI  = "data:image/png;base64,"
 	imgJPEGURI = "data:image/jpeg;base64,"
 	imgSVGURI  = "data:image/svg+xml;base64,"
+	imgWebPURI = "data:image/webp;base64,"
 )
 
 // 各格式的魔数/开头标记。
 var (
 	imgPNGMagic   = []byte{0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a}
 	imgJPEGMagic  = []byte{0xff, 0xd8, 0xff}
+	imgRIFFMagic  = []byte("RIFF")
+	imgWebPTag    = []byte("WEBP")
 	imgSVGOpenTag = []byte("<svg")
 	imgXMLDecl    = []byte("<?xml")
 )
@@ -37,7 +41,7 @@ var (
 // ImageDataURI 把运行期拿到的图片字节转成 data URI；空字节或认不出的格式返回空串。
 //
 // SVG 也支持：Chromium 能直接渲染 <img src="data:image/svg+xml;base64,...">，
-// 而上游的战备图标有一批就是 SVG（实测 298 件装备里 58 件）。
+// WebP 同理（现在装备图的主流格式）。
 // 注意 SVG 只在**卡片**里能用：Telegram 的行内缩略图不接受 SVG，那条路要另想办法（见 arsenal 包）。
 func ImageDataURI(raw []byte) string {
 	switch detectImageMime(raw) {
@@ -47,12 +51,14 @@ func ImageDataURI(raw []byte) string {
 		return imgJPEGURI + base64.StdEncoding.EncodeToString(raw)
 	case "svg":
 		return imgSVGURI + base64.StdEncoding.EncodeToString(raw)
+	case "webp":
+		return imgWebPURI + base64.StdEncoding.EncodeToString(raw)
 	default:
 		return ""
 	}
 }
 
-// detectImageMime 按内容判断图片类型，返回 "png" / "jpeg" / "svg"，认不出返回空串。
+// detectImageMime 按内容判断图片类型，返回 "png" / "jpeg" / "svg" / "webp"，认不出返回空串。
 //
 // 只看开头几个字节，不做完整解码：几百 KB 的图每次渲染都全量解码没有意义，
 // 而「是不是图」这个判断错了的后果也只是卡片上少一张图（下面还有 <img> 的兜底）。
@@ -62,6 +68,8 @@ func detectImageMime(raw []byte) string {
 		return "png"
 	case bytes.HasPrefix(raw, imgJPEGMagic):
 		return "jpeg"
+	case isWebPBytes(raw):
+		return "webp"
 	}
 	// SVG 是文本，开头可能是 XML 声明、注释或直接的 <svg>，前面还可能有 UTF-8 BOM 与空白。
 	head := bytes.TrimLeft(bytes.TrimPrefix(raw, []byte{0xef, 0xbb, 0xbf}), " \t\r\n")
@@ -73,15 +81,22 @@ func detectImageMime(raw []byte) string {
 	return ""
 }
 
+// isWebPBytes 判断字节流是不是 WebP：RIFF 容器 + 偏移 8 起的 "WEBP" 标记。
+func isWebPBytes(raw []byte) bool {
+	return len(raw) >= 12 && bytes.HasPrefix(raw, imgRIFFMagic) && bytes.Equal(raw[8:12], imgWebPTag)
+}
+
 // ThumbDataURI 把图片字节转成适合内联进卡片的 data URI：位图先等比缩到 maxWidth 以内再编码成 PNG。
 //
 // 为什么要缩：卡片的缩略图位置只有几十 CSS px，而上游的装备图都是几百 px 的原图
 // （实测单张 33~138KB）。一张卡片可能挂十几张图，原图内联会把 HTML 撑到几 MB，
 // 截图出来的 PNG 也跟着变大——而 Telegram 对图片体积是有上限的。
 //
-// 三种情况不做缩放，直接内联原图：
+// 四种情况不做缩放，直接内联原图：
 //   - maxWidth <= 0（调用方明确不要缩放）；
 //   - SVG：标准库没有 SVG 光栅化器，原样内联交给浏览器缩放，反而更小更清晰；
+//   - WebP：标准库同样没有 WebP 解码器（不想为此加一个第三方依赖），原样内联——
+//     上游的装备图 WebP 实测单张 20~60KB，卡片上十几张也在可接受范围内；
 //   - 解码失败或已经是小图：宁可原样内联，也不要把一张能显示的图变成不显示。
 func ThumbDataURI(raw []byte, maxWidth int) string {
 	if len(raw) == 0 || maxWidth <= 0 || detectImageMime(raw) == "svg" {

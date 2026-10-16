@@ -62,8 +62,12 @@ type Config struct {
 	Dir          string        // 缓存目录；空串用 defaultDir
 	TTL          time.Duration // 目录缓存有效期；<=0 用 defaultTTL
 	Timeout      time.Duration // 下载超时；<=0 用 defaultTimeout
-	SourcePrefix string        // 上游地址前缀（含结尾斜杠）；空串用 GitHub raw。自建镜像与单测用得上
+	SourcePrefix string        // 老源（hd2tool）的地址前缀（含结尾斜杠）；空串用 GitHub raw。自建镜像与单测用得上
 	MirrorPrefix string        // GitHub 镜像前缀（含结尾斜杠）；空串用内置镜像，传 "-" 表示不用镜像
+	Source       string        // 数据源：helldivers-api（默认）或 hd2tool
+	APIBase      string        // 新源的站点地址；空串用 defaultAPIBase
+	ZhWikiBase   string        // 新源用来补中文名的术语表地址；空串用 defaultZhWikiBase，传 "-" 表示不拉
+	ZhNamesPath  string        // 本地中文名覆盖表；空串用缓存目录下的 zh-names.local.json
 }
 
 // Deps 是外部依赖，除 HTTP 外都可以留空。
@@ -81,6 +85,7 @@ type Store struct {
 	log   func(format string, args ...any)
 	now   func() time.Time
 	thumb ThumbResolver
+	src   Source
 
 	mu        sync.Mutex
 	catalog   *Catalog
@@ -115,7 +120,7 @@ func New(cfg Config, deps Deps) *Store {
 	if now == nil {
 		now = time.Now
 	}
-	return &Store{
+	store := &Store{
 		cfg:       cfg,
 		http:      client,
 		log:       logf,
@@ -123,10 +128,24 @@ func New(cfg Config, deps Deps) *Store {
 		thumb:     deps.Thumb,
 		thumbURLs: map[string]string{},
 	}
+	// 来源在这里定下来：两种源都只往磁盘写同一种目录 JSON，别的逻辑不受影响。
+	store.src = newSource(store)
+	return store
 }
 
 // Dir 返回缓存目录（供启动日志与测试用）。
 func (s *Store) Dir() string { return s.cfg.Dir }
+
+// Source 返回当前数据源的短名（启动日志与排障用）。
+func (s *Store) Source() string { return s.src.Name() }
+
+// zhNamesPath 返回本地中文名覆盖表的路径（默认在缓存目录下）。
+func (s *Store) zhNamesPath() string {
+	if path := strings.TrimSpace(s.cfg.ZhNamesPath); path != "" {
+		return path
+	}
+	return filepath.Join(s.cfg.Dir, zhNamesLocalFile)
+}
 
 // sourcePrefix 返回实际使用的主源前缀（含结尾斜杠）。
 func (s *Store) sourcePrefix() string {
@@ -200,23 +219,22 @@ func (s *Store) Catalog(ctx context.Context) (*Catalog, error) {
 	return catalog, nil
 }
 
-// refresh 下载目录与外号表并落盘。外号表失败不算致命：少几条别名，命令照常能用。
+// refresh 取回目录并落盘，再顺手更新玩家外号表。外号表失败不算致命：少几条别名，命令照常能用。
 func (s *Store) refresh(ctx context.Context, catalogPath, aliasPath string) error {
-	raw, err := s.fetch(ctx, s.rawURLs("src/data/catalog.json"), maxCatalogBytes)
+	raw, err := s.src.CatalogJSON(ctx)
 	if err != nil {
-		return fmt.Errorf("下载装备目录失败：%w", err)
+		return fmt.Errorf("获取装备目录失败：%w", err)
 	}
 	if err := writeFileAtomic(catalogPath, raw); err != nil {
 		return fmt.Errorf("写入装备目录缓存失败：%w", err)
 	}
 
-	aliases, err := s.fetch(ctx, s.rawURLs("src/data/community-aliases.json"), maxCatalogBytes)
-	if err != nil {
-		s.log("[arsenal] 下载玩家外号表失败（少几条别名，不影响其它功能）：%v", err)
-		return nil
-	}
-	if err := writeFileAtomic(aliasPath, aliases); err != nil {
-		s.log("[arsenal] 写入玩家外号表缓存失败（不影响目录）：%v", err)
+	// 外号表由源决定给不给：hd2tool 源直接下载，helldivers-api 源没有这张表（返回 nil），
+	// 这时保留磁盘上的旧文件——它是社区整理的，跟哪个源无关。
+	if aliases := s.src.AliasesJSON(ctx); len(aliases) > 0 {
+		if err := writeFileAtomic(aliasPath, aliases); err != nil {
+			s.log("[arsenal] 写入玩家外号表缓存失败（不影响目录）：%v", err)
+		}
 	}
 	return nil
 }
@@ -263,7 +281,7 @@ func (s *Store) Image(ctx context.Context, item Item) ([]byte, error) {
 	if raw, err := os.ReadFile(path); err == nil {
 		return raw, nil
 	}
-	raw, err := s.fetch(ctx, s.imageURLs(item.ImagePath), maxImageBytes)
+	raw, err := s.fetch(ctx, s.src.ImageURLs(item.ImagePath), maxImageBytes)
 	if err != nil {
 		return nil, fmt.Errorf("下载装备图失败（%s）：%w", item.ID, err)
 	}
@@ -274,10 +292,13 @@ func (s *Store) Image(ctx context.Context, item Item) ([]byte, error) {
 	return raw, nil
 }
 
-// imageFilePath 是装备图的缓存路径；扩展名沿用上游（png / svg）。
+// imageFilePath 是装备图的缓存路径；扩展名沿用上游（png / svg / webp）。
+//
+// 新源的地址形如 https://…/images/v1/weapons/ar-11-arbitrator.ce5b887c.webp：
+// 文件名里带内容哈希，取扩展名时要先去掉查询串与片段，否则会把 "?.jpg" 之类当后缀。
 func (s *Store) imageFilePath(item Item) string {
 	name := item.ID
-	if ext := filepath.Ext(item.ImagePath); ext != "" {
+	if ext := imageExt(item.ImagePath); ext != "" {
 		name += strings.ToLower(ext)
 	} else {
 		name += ".png"
@@ -285,27 +306,47 @@ func (s *Store) imageFilePath(item Item) string {
 	return filepath.Join(s.cfg.Dir, imageDirName, name)
 }
 
-// imageURLs 展开装备图的候选地址（主源 + 镜像）。
+// imageExt 取地址的扩展名，忽略查询串与片段；过长的「扩展名」当没有（上游换了参数也不至于生成怪文件名）。
+func imageExt(path string) string {
+	trimmed := strings.TrimSpace(path)
+	if idx := strings.IndexAny(trimmed, "?#"); idx >= 0 {
+		trimmed = trimmed[:idx]
+	}
+	ext := filepath.Ext(trimmed)
+	if len(ext) > 6 {
+		return ""
+	}
+	return ext
+}
+
+// imageURLs 把仓库内的相对路径展开成候选地址（只有老源用得上；新源的地址是绝对地址）。
 func (s *Store) imageURLs(relPath string) []string { return s.rawURLs("public/" + relPath) }
 
 // ThumbURL 返回行内结果可以直接交给 Telegram 的公网缩略图地址。
 //
 // 为什么行内要用公网地址而不是本地图：Telegram 的 answerInlineQuery 只接受一个 URL 自己去取图，
 // 我们不打算为它做图床，也不该把 bot token 拼进 api.telegram.org/file/... 暴露出去。
-// PNG 直接给上游地址；SVG 交给 ThumbResolver 去换位图。
+// PNG / JPEG 直接给上游地址；SVG 与 WebP 交给 ThumbResolver 去 wiki.gg 换一张 PNG——
+//   - SVG：Telegram 不收；
+//   - WebP：Telegram 对 photo_url 的格式要求保守（历史上只认 JPEG/PNG），换 PNG 更稳。
 //
 // 实测提醒：helldivers.wiki.gg 没有开 SVG 渲染，SVG 文件页返回的地址点开还是 .svg
 // （58 件 SVG 装备的文件页全是这种），因此这类装备在行内结果里**没有图标**。
-// 卡片不受影响：卡片里的装备图是本地图集内联进 HTML 的，Chromium 能直接渲染 SVG。
+// 卡片不受影响：卡片里的装备图是本地图集内联进 HTML 的，Chromium 能直接渲染 SVG 与 WebP。
 //
 // 解析不出来、或拿到的不是位图时返回空串，调用方就不带缩略图——
 // 宁可只有文字，也不要一个 Telegram 取不到的坏地址。
 func (s *Store) ThumbURL(ctx context.Context, item Item) string {
-	if strings.TrimSpace(item.ImagePath) == "" {
+	path := strings.TrimSpace(item.ImagePath)
+	if path == "" {
 		return ""
 	}
-	if !item.ImageIsSVG {
-		return s.imageURLs(item.ImagePath)[0]
+	direct := s.src.ImageURLs(path)
+	if len(direct) == 0 {
+		return ""
+	}
+	if !item.ImageIsSVG && !isWebPURL(path) {
+		return direct[0]
 	}
 	if s.thumb == nil || strings.TrimSpace(item.ImageFilePage) == "" {
 		return ""
@@ -318,7 +359,7 @@ func (s *Store) ThumbURL(ctx context.Context, item Item) string {
 	}
 	url, err := s.thumb.FileThumbURL(ctx, item.ImageFilePage, thumbWidth)
 	if err != nil {
-		s.log("[arsenal] 解析 SVG 缩略图失败（这条结果不带图标）：%v", err)
+		s.log("[arsenal] 解析缩略图失败（这条结果不带图标）：%v", err)
 		return ""
 	}
 	if !isBitmapURL(url) {
@@ -331,6 +372,15 @@ func (s *Store) ThumbURL(ctx context.Context, item Item) string {
 	}
 	s.storeThumb(item.ImageFilePage, url)
 	return url
+}
+
+// isWebPURL 判断地址指向的是 WebP（行内缩略图要换成 wiki 的 PNG）。
+func isWebPURL(raw string) bool {
+	trimmed := strings.TrimSpace(raw)
+	if idx := strings.IndexAny(trimmed, "?#"); idx >= 0 {
+		trimmed = trimmed[:idx]
+	}
+	return strings.HasSuffix(strings.ToLower(trimmed), ".webp")
 }
 
 // isBitmapURL 判断地址指向的是位图（忽略查询串里的版本号）。

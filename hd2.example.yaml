@@ -62,7 +62,11 @@ arsenal:
   dir: data/arsenal           # 装备目录与装备图的缓存目录（相对进程工作目录）
   ttl: 86400                  # 目录缓存有效期（秒）；上游一天一更
   timeout: 30                 # 单次下载超时（秒）
-  mirror: https://gh-proxy.org/  # GitHub 镜像前缀，主源连不上时才用；填 "-" 表示不用镜像
+  source: helldivers-api      # 数据源：helldivers-api（默认，社区每天自动抓 wiki.gg）或 hd2tool（已停更的静态目录）
+  api_base: https://helldivers-api.dionatha.com.br  # helldivers-api 的站点地址，自建镜像时改这里
+  zh_wiki: https://jerry114514.github.io/HD2_Wiki/data/wiki/zh  # 补中文名的术语表地址；填 "-" 表示不拉，只用内置中文名表
+  zh_names: ""                # 本地中文名覆盖表（id → 中文名），留空用 data/arsenal/zh-names.local.json
+  mirror: https://gh-proxy.org/  # 只在 source=hd2tool 时生效的 GitHub 镜像前缀；填 "-" 表示不用镜像
 
 bestiary:
   dir: data/bestiary          # 敌人图鉴的缓存目录

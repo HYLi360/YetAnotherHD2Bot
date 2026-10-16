@@ -153,8 +153,12 @@ func TestStoreListUsesFreshDiskCache(t *testing.T) {
 }
 
 // TestStoreListRefreshesAfterTTL 校验 TTL 过期后重新拉取并覆盖缓存。
+//
+// 起始时钟用真实时间而不是固定日期：缓存新鲜度是「注入的时钟 - 缓存文件 mtime」，
+// 写死一个过去的时间点之后，文件 mtime（真实时间）永远大于时钟，缓存被判成永远新鲜，
+// 用例就会在真实日期走过那天之后失效（2026-10-16 撞上过）。
 func TestStoreListRefreshesAfterTTL(t *testing.T) {
-	now := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+	now := time.Now()
 	src := &fakeSource{rows: fixtureRows(), base: "https://w"}
 	store := newStore(t, src, &now, nil)
 	if _, err := store.List(context.Background()); err != nil {
@@ -171,8 +175,9 @@ func TestStoreListRefreshesAfterTTL(t *testing.T) {
 }
 
 // TestStoreListFallsBackToStaleCache 校验拉取失败但有旧缓存时用旧缓存，并记一条中文日志。
+// 起始时钟同样用真实时间，理由见上一条用例。
 func TestStoreListFallsBackToStaleCache(t *testing.T) {
-	now := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+	now := time.Now()
 	src := &fakeSource{rows: fixtureRows(), base: "https://w"}
 	store := newStore(t, src, &now, nil)
 	if _, err := store.List(context.Background()); err != nil {

@@ -51,9 +51,12 @@
 | `api.helldivers2.dev` | 主源 | `/api/v1` 的 war、planets、campaigns、assignments、dispatches、events；空间站只在 `/api/v2/space-stations` 上。要求带 `X-Super-Client` 与 `X-Super-Contact`（即 `api.contact`）|
 | `helldiverscompanion.com` | 补充源 | 行动变量整包（只有 `/planet` 会用到），不占主源额度 |
 | `helldivers.wiki.gg` | 数值与图标 | 敌人图鉴数据与图标，内容按 CC BY-NC-SA 授权，运行时缓存到 `data/bestiary` |
+| `helldivers-api.dionatha.com.br` | **装备目录主源** | 社区项目 `DionathaGoulart/Helldivers-api`，每天定时抓 wiki.gg 后发布静态 JSON，因此游戏出新债券 / 新装备能自己跟上。目录在本地转成项目自己的 catalog JSON 再落盘 |
 | 社区中文维基 `HD2_Wiki` | 图鉴详细资料 | 内置在 `src/atlas/data`，随二进制一起发布 |
+| 社区中文维基 `HD2_Wiki` 术语表 | 装备中文名 | `terms.json`（1700+ 条中英对照）：新源只有英文名，每次刷新目录时顺带拉一次补中文名 |
+| `SalmonC/HD2Tool` | 中文名基线 + 备用源 | 官方简中译名表已内置（`src/arsenal/data/zh-names.json`）。**该仓库自 2026-08-14 起不再更新数据**，所以从 v0.1.5 起降级为备用源：`arsenal.source: hd2tool` 可以切回去，镜像 `arsenal.mirror` 也只在切回时生效 |
 | 社区站点 `HD2-Galatic_war-Map` | 群系实景图 | `src/render/assets/biomes/` |
-| GitHub 镜像 `gh-proxy.org` | 装备目录兜底 | 只在主源连不上时使用（`arsenal.mirror`，填 `-` 表示不用）|
+| GitHub 镜像 `gh-proxy.org` | 备用源的兜底 | 只在 `arsenal.source: hd2tool` 且主源连不上时使用 |
 
 ## 快速开始
 
@@ -87,7 +90,7 @@ go run .
 | `http` | 本地 HTTP 服务（`/healthz` 健康检查）的监听地址与端口 |
 | `render` | 出图开关、卡片宽度、缩放、超时与图片格式 |
 | `translate` | 正文翻译：OpenAI 兼容接口或免费接口、模型、冷却与限速 |
-| `arsenal` / `bestiary` | 装备目录与敌人图鉴的缓存目录、有效期、超时与来源 |
+| `arsenal` / `bestiary` | 装备目录与敌人图鉴的缓存目录、有效期、超时与来源（装备侧含 `source` / `api_base` / `zh_wiki` / `zh_names`） |
 | `push` | 定时播报：cron 表达式、每节最多几条 |
 
 几个容易踩的点：
@@ -96,6 +99,8 @@ go run .
 - `limit.rate` 默认 4 而不是 5，是给 429 留余量；`limit.reserve`（默认 1）是只留给用户命令的额度，定时推送最多用 `rate - reserve` 个。
 - `cache` 里的 TTL 不要大于推送间隔（默认 5 分钟），否则中间的变化会被缓存吃掉，播报会漏。
 - `render.enabled=false` 时所有命令直接走纯文本，适合没有浏览器的环境。
+- 装备目录换源（`arsenal.source`）：默认 `helldivers-api`（每天自动抓 wiki.gg，新债券不会缺）；`hd2tool` 是已停更的静态目录，只在前者整体挂掉时临时切回用。
+- 新源只给英文名，中文名按「本地覆盖 → 内置表 → 运行期术语表」三层补；最新出的一两件装备（例如某套新护甲）三层都没有时会显示英文名，这是有意为之——不猜译名。想补就在 `data/arsenal/zh-names.local.json` 里写 `{"items": {"<id>": "中文名"}, "warbonds": {}}`，刷新一次缓存即可生效。
 
 ## 部署
 
@@ -120,7 +125,7 @@ hd2.example.yaml            配置模板（真实配置 hd2.yaml 不进仓库）
 src/config/                 配置读取与校验
 src/hd2/                    数据层：主源客户端、补充源、限流、缓存、快照降级、聚合服务
 src/hd2/glossary/           星球 / 星区 / 敌人 / 战备的官方简中译名
-src/arsenal/                装备目录（武器、战备、护甲、手雷、债券）与装备图缓存
+src/arsenal/                装备目录（武器、战备、护甲、手雷、债券）：数据源与装备图缓存
 src/bestiary/ src/wikigg/   敌人图鉴与 wiki.gg 客户端
 src/atlas/                  图鉴详细资料（社区中文维基数据，随二进制发布）
 src/translate/              正文翻译层（失败一律回退原文）
@@ -150,3 +155,11 @@ HD2_RENDER_SMOKE=1 go test ./src/plugins/...
 - 上游额度是每 IP 每分钟 5 次且所有端点共用，所以缓存与限流不能去掉；`limit.reserve` 是在「推送及时」与「命令可用」之间取的折中。
 - 行动变量只有补充源提供，取一次要下整包，因此缓存比其他数据长（`cache.effects_ttl`）。
 - 空间站数据只存在于上游 `/api/v2`，端点一旦变化需要同步改 `src/hd2/client.go` 里的端点表。
+- 装备目录换源之后有几处口径变化，都不是 bug：
+  - 装备图是上游的 **WebP**（实测单张 6~60 KB）。卡片侧不做缩放、原样内联（标准库没有 WebP 解码器，不为它加依赖），
+    Chromium 能直接渲染；行内查询的缩略图仍走 wiki.gg 的 PNG 文件页。
+  - 上游的攻击数据没有「持续伤害（DPS）」这一项，所以燃烧 / 毒气类部件在卡片上不再显示「持续伤害」那一行。
+  - 目录只收已上线的装备：上游标了 `upcoming` 的（还没上线的新债券及其装备）不进目录，上线后下一轮刷新自动出现；
+    跳过数量会写在启动日志的 `[arsenal] 目录已生成…` 一行里。
+  - 新源没有玩家外号表，`data/arsenal/community-aliases.json` 会一直沿用最后一次从备用源下载的那份（跟源无关）。
+  - `data/arsenal/images/` 里可能同时留着旧源的 `.png` 与新源的 `.webp`，前者是缓存残留，可以删。

@@ -143,12 +143,12 @@ func run() int {
 	// 提示性检查：TTL 过长会漏检变化，但用户把轮询调稀一点时同样的 TTL 就不算长，所以只提示、不阻止启动。
 	warnIfCacheTTLTooLong(cfg, log.Printf)
 
-	// 图鉴数据层：装备目录与装备图来自 GitHub（HD2Tool），敌人数值与图标来自 wiki.gg。
+	// 图鉴数据层：装备目录来自社区维护的 helldivers-api（每日抓 wiki.gg），敌人数值与图标来自 wiki.gg。
 	// wiki 客户端同时作为装备目录的缩略图解析器注入——SVG 装备在行内结果里需要换成位图。
 	wiki := buildWikiClient(cfg)
 	gearStore := buildArsenalStore(cfg, wiki)
 	beastStore := buildBestiaryStore(cfg, wiki)
-	log.Printf("图鉴数据层就绪：装备缓存=%s 图鉴缓存=%s wiki=%s", gearStore.Dir(), beastStore.Dir(), wiki.BaseURL())
+	log.Printf("图鉴数据层就绪：装备源=%s 装备缓存=%s 图鉴缓存=%s wiki=%s", gearStore.Source(), gearStore.Dir(), beastStore.Dir(), wiki.BaseURL())
 
 	// 插件命令与行内查询：命令用 /ping 这类消息能力，卡片命令还需要数据层、渲染引擎与展示时区。
 	// displayLocation 只算一次，避免各插件拿到不同的时区对象。
@@ -412,13 +412,18 @@ func buildWikiClient(cfg *config.Config) *wikigg.Client {
 	}, wikigg.Deps{})
 }
 
-// buildArsenalStore 装配装备图鉴的数据层。镜像前缀原样透传：
-// 配置里写 "-" 表示只用主源，留空表示用内置镜像（口径在 arsenal 包里）。
+// buildArsenalStore 装配装备图鉴的数据层。
+// 默认源是 helldivers-api（每天自动抓 wiki.gg）；arsenal.source 可以切回老源 hd2tool，
+// 那时 github 镜像前缀原样透传：写 "-" 表示只用主源，留空表示用内置镜像（口径在 arsenal 包里）。
 func buildArsenalStore(cfg *config.Config, thumb arsenal.ThumbResolver) *arsenal.Store {
 	return arsenal.New(arsenal.Config{
 		Dir:          cfg.Arsenal.Dir,
 		TTL:          cfg.Arsenal.TTL.Duration(),
 		Timeout:      cfg.Arsenal.Timeout.Duration(),
+		Source:       cfg.Arsenal.Source,
+		APIBase:      cfg.Arsenal.APIBase,
+		ZhWikiBase:   cfg.Arsenal.ZhWikiBase,
+		ZhNamesPath:  cfg.Arsenal.ZhNames,
 		MirrorPrefix: cfg.Arsenal.Mirror,
 	}, arsenal.Deps{Logger: log.Printf, Thumb: thumb})
 }

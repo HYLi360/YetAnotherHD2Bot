@@ -28,7 +28,7 @@ func testPNGBytes(t *testing.T) []byte {
 	return buf.Bytes()
 }
 
-// TestImageDataURISniffsFormats 校验运行期图片按内容识别格式：PNG / JPEG / SVG 各走各的前缀。
+// TestImageDataURISniffsFormats 校验运行期图片按内容识别格式：PNG / JPEG / SVG / WebP 各走各的前缀。
 func TestImageDataURISniffsFormats(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -40,6 +40,7 @@ func TestImageDataURISniffsFormats(t *testing.T) {
 		{"SVG 直接以标签开头", []byte(`<svg xmlns="http://www.w3.org/2000/svg"></svg>`), "data:image/svg+xml;base64,"},
 		{"SVG 带 XML 声明", []byte("<?xml version=\"1.0\"?>\n<svg xmlns=\"http://www.w3.org/2000/svg\"/>"), "data:image/svg+xml;base64,"},
 		{"SVG 带 BOM 与前导空白", append([]byte{0xef, 0xbb, 0xbf}, []byte("\n  <svg/>")...), "data:image/svg+xml;base64,"},
+		{"WebP（装备图现在的格式）", testWebPBytes(), "data:image/webp;base64,"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -54,6 +55,15 @@ func TestImageDataURISniffsFormats(t *testing.T) {
 	}
 }
 
+// testWebPBytes 造一个最小的 WebP 头（RIFF 容器 + WEBP 标记）：识别只看开头，不需要真图。
+func testWebPBytes() []byte {
+	raw := make([]byte, 16)
+	copy(raw[0:4], "RIFF")
+	copy(raw[8:12], "WEBP")
+	copy(raw[12:16], "VP8X")
+	return raw
+}
+
 // TestImageDataURIRejectsUnknown 校验认不出的内容返回空串：
 // 卡片上少一张图，好过渲染出一张破图或带错 MIME 的 data URI。
 func TestImageDataURIRejectsUnknown(t *testing.T) {
@@ -63,6 +73,7 @@ func TestImageDataURIRejectsUnknown(t *testing.T) {
 		"HTML":           []byte("<html><body>x</body></html>"),
 		"半个 PNG":         {0x89, 'P', 'N', 'G'},
 		"自称 XML 但不是 SVG": []byte("<?xml version=\"1.0\"?><rss/>"),
+		"半个 WebP 头":       []byte("RIFF\x10\x00\x00\x00"),
 	}
 	for name, raw := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -177,6 +188,15 @@ func TestThumbDataURIPassesSVGThrough(t *testing.T) {
 	svg := []byte(`<svg xmlns="http://www.w3.org/2000/svg" width="240" height="240"></svg>`)
 	if got := ThumbDataURI(svg, 32); got != ImageDataURI(svg) {
 		t.Error("SVG 应原样内联")
+	}
+}
+
+// TestThumbDataURIPassesWebPThrough 校验 WebP 原样内联：标准库没有 WebP 解码器，
+// 缩不了就不缩——卡片 CSS 会把它压到该有的尺寸，宁可 HTML 大一点，也不要整张图不显示。
+func TestThumbDataURIPassesWebPThrough(t *testing.T) {
+	webp := testWebPBytes()
+	if got := ThumbDataURI(webp, 32); got != ImageDataURI(webp) {
+		t.Errorf("WebP 应原样内联，实际 %q", got)
 	}
 }
 

@@ -73,12 +73,15 @@ func (c *counterResolver) FileThumbURL(context.Context, string, int) (string, er
 func fixedNow(at time.Time) func() time.Time { return func() time.Time { return at } }
 
 // newStore 构造一个指向假上游、时钟固定的取数入口。mirror 为空时表示不用镜像。
+// 这里显式选老源（hd2tool）：它才是「下载一份目录 JSON」的源，单测用假服务器打量它最省事；
+// 新源（helldivers-api）要拉好几个集合、还要做转换，它的用例在 helldiversapi_test.go 里。
 func newStore(t *testing.T, upstream *fakeUpstream, dir string, now time.Time, mirror string, resolver ThumbResolver) *Store {
 	t.Helper()
 	return New(Config{
 		Dir:          dir,
 		TTL:          time.Hour,
 		Timeout:      5 * time.Second,
+		Source:       sourceKindHD2Tool,
 		SourcePrefix: upstream.server.URL + "/",
 		MirrorPrefix: mirror,
 	}, Deps{Now: fixedNow(now), Logger: func(string, ...any) {}, Thumb: resolver})
@@ -214,7 +217,7 @@ func TestCatalogFailsWithoutCacheOrNetwork(t *testing.T) {
 	if err == nil {
 		t.Fatal("既无缓存又下载失败时应报错")
 	}
-	if !strings.Contains(err.Error(), "下载装备目录失败") {
+	if !strings.Contains(err.Error(), "获取装备目录失败") {
 		t.Errorf("错误文案应说明是目录下载失败，实际 %v", err)
 	}
 }
@@ -231,6 +234,7 @@ func TestCatalogTriesMirrorAfterPrimaryFails(t *testing.T) {
 	store := New(Config{
 		Dir:          dir,
 		TTL:          time.Hour,
+		Source:       sourceKindHD2Tool,
 		SourcePrefix: broken.URL + "/",
 		// 镜像前缀拼在完整上游地址之前，与 gh-proxy 的用法一致。
 		MirrorPrefix: upstream.server.URL + "/",

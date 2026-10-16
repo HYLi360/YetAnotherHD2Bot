@@ -65,21 +65,52 @@
 卡片皮肤的调色板（纯黑底 + 琥珀强调 + 45° 斜纹底纹）同样参考了该站点的 `assets/css/tokens.css`，
 属于**设计参考**，没有复制对方的 CSS 代码。
 
-## 三、`SalmonC/HD2Tool`（装备目录与装备图，MIT）
+## 三、`DionathaGoulart/Helldivers-api`（装备目录与装备图，当前默认源）
 
-`/gun`、`/strat`、`/armor`、`/grenade`、`/warbonds` 的目录数据与装备图取自开源项目
-**`SalmonC/HD2Tool`**（MIT License）：
+`/gun`、`/strat`、`/armor`、`/grenade`、`/warbonds` 的目录数据与装备图默认取自
+社区项目 **`DionathaGoulart/Helldivers-api`**（https://helldivers-api.dionatha.com.br）：
+它每天定时抓一次 `helldivers.wiki.gg`（抓取任务在 GitHub Actions 上，
+见上游仓库 `.github/workflows/scrape.yml`），把结果发布成静态 JSON，因此游戏出新债券后目录能自己跟上。
 
 | 上游文件 | 用途 | 本地形态 |
 | --- | --- | --- |
-| `src/data/catalog.json` | 装备 / 债券目录（298 件） | 运行时下载 → `data/arsenal/catalog.json` |
+| `/v1/weapons.json`、`/v1/stratagems.json`、`/v1/armors.json`、`/v1/warbonds.json`、`/v1/passives.json` | 装备 / 战备 / 护甲 / 债券 / 护甲被动 | 运行时下载 → 转换成目录 JSON → `data/arsenal/catalog.json` |
+| `/images/v1/<集合>/<id>.<hash>.webp` | 装备图（WebP，实测单张 6~60 KB） | 按需下载 → `data/arsenal/images/` |
+
+上游声明其内容按 **CC BY-NC-SA 4.0** 发布（署名 + 非商业 + 相同方式共享），
+数据与图片的原始版权属于 Wiki 的编辑者与 Arrowhead；本项目只做转换与展示，
+目录快照里逐件标了 `License/CC-BY-NC-SA`。
+
+## 三之二、`SalmonC/HD2Tool`（中文名表与备用数据源，MIT）
+
+**`SalmonC/HD2Tool`**（MIT License）自 2026-08-14 起不再更新数据，因此降级为备用源
+（`arsenal.source: hd2tool` 可以切回去），但它仍有两个用途：
+
+| 上游文件 | 用途 | 本地形态 |
+| --- | --- | --- |
+| `src/data/catalog.json` | 装备 / 债券的**官方简体中文名**（298 件装备、24 本债券） | 生成 `src/arsenal/data/zh-names.json`，随二进制发布 |
+| `src/data/catalog.json` | 切到 `hd2tool` 源时的完整目录 | 运行时下载 → `data/arsenal/catalog.json` |
 | `src/data/community-aliases.json` | 玩家外号表（38 条） | 运行时下载 → `data/arsenal/community-aliases.json` |
-| `public/assets/wiki/<id>.png\|svg` | 装备图（240 PNG + 58 SVG） | 按需下载 → `data/arsenal/images/` |
+| `public/assets/wiki/<id>.png\|svg` | 切到 `hd2tool` 源时的装备图 | 按需下载 → `data/arsenal/images/` |
 
 上游仓库的 MIT 覆盖**代码与数据编排**；装备图自身另有许可标注（上游目录里逐件的 `image.license`，
 实测 188 张 `License/CC-BY-NC-SA`、109 张 `License/Arrowhead`、1 张 `License/Fairuse`），
 也就是说这些图是**游戏内素材或 wiki 截图**，不是 HD2Tool 自绘。
 用户已知悉这一点，并明确表示「版权问题不用关注，可以使用游戏画面」（2026-09-17）。
+
+## 三之三、社区中文维基的术语表（补中文名，2026-10-16 新增）
+
+新数据源给的是英文名，而群里的查询与卡片标题都用中文名，因此每次刷新目录时会顺带拉一次
+社区站点 **`jerry114514/Jerry114514.github.io`** 的 `HD2_Wiki/data/wiki/zh/terms.json`
+（1700+ 条中英术语对照，含武器与债券的译名与出处），按英文名给目录补中文名：
+
+| 上游文件 | 用途 | 本地形态 |
+| --- | --- | --- |
+| `terms.json` | 英文名 → 中文名（武器 / 债券 / 术语） | 只在内存里用；失败就退回内置的 `src/arsenal/data/zh-names.json` |
+
+优先级：本地覆盖 `data/arsenal/zh-names.local.json` > 内置表（HD2Tool 官方译名 + 术语表快照）> 运行期术语表。
+三处都没有的条目（例如最新几套护甲）先显示英文名，不猜译名。
+
 
 ## 四、`helldivers.wiki.gg`（敌人图鉴数值与图标）
 
